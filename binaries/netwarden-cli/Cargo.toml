@@ -1,0 +1,9 @@
+[package]
+name = "nw"
+description = "NetWarden CLI"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tcping = { path = "../../libraries/tcping" }
+netinfo = { path = "../../libraries/netinfo" }
