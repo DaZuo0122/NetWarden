@@ -190,6 +190,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 
 [[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -315,6 +321,7 @@ name = "netinfo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dunce",
  "local-ip-address",
  "netstat2",
 ]
@@ -420,6 +427,7 @@ dependencies = [
 name = "nw"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "netinfo",
  "tcping",
 ]
