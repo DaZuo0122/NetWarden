@@ -1,0 +1,12 @@
+[package]
+name = "probe"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "probe"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+tracert = "0.9.0"

@@ -1,0 +1,17 @@
+[package]
+name = "geoip"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "geoip"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+maxminddb = "0.26.0"
+anyhow = "1.0"
+serde = { version = "1.0.228", default-features = false, features = ["derive"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+dunce = "1.0"

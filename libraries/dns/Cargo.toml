@@ -1,0 +1,11 @@
+[package]
+name = "dns"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "dns"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]

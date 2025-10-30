@@ -1,5 +1,5 @@
-use anyhow::Ok;
-use anyhow::{Result, anyhow};
+use anyhow::{Ok, Result, anyhow};
+use cert::{CertificateInfo, CertificateResult, load_native_certs_raw, parse_certificate};
 use local_ip_address::list_afinet_netifas;
 use netstat2::{
     self, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState, get_sockets_info,
@@ -14,6 +14,8 @@ use std::str::FromStr;
 
 #[cfg(target_os = "windows")]
 use dunce;
+
+pub mod cert;
 
 #[derive(Debug, Clone)]
 pub struct SensitiveSocket {
@@ -42,6 +44,21 @@ pub struct PortSet {
     // keep separate sets for TCP and UDP ports
     tcp: BTreeSet<u16>,
     udp: BTreeSet<u16>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Family {
+    V4,
+    V6,
+}
+
+#[derive(Debug, Clone)]
+pub struct RouteInfo {
+    pub family: Family,
+    pub gateway: IpAddr,
+    pub local_addr: Option<IpAddr>,
+    pub if_index: u32,
+    pub metric: Option<u32>,
 }
 
 pub fn list_sensitve_sockets(port_set: &PortSet) -> Result<Vec<SensitiveSocket>> {
@@ -315,6 +332,257 @@ fn addr_to_string(addr: &IpAddr) -> String {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub mod platform {
+    use super::*;
+    use anyhow::Result;
+    use libc::{AF_INET, AF_INET6, freeifaddrs, getifaddrs, ifaddrs};
+    use neli::attr::NlattrIter;
+    use neli::consts::{nl::NlmF, rtnl::RtAddrFamily, rtnl::Rtm};
+    use neli::nl::{NlPayload, Nlmsghdr};
+    use neli::rtnl::Rtmsg;
+    use neli::socket::NlSocketHandle;
+    use std::io;
+
+    fn nl_socket() -> Result<NlSocketHandle> {
+        Ok(NlSocketHandle::connect(
+            neli::consts::socket::NlFamily::Route,
+            None,
+            &[],
+        )?)
+    }
+
+    fn find_local_for_if(idx: u32, fam: Family) -> Option<IpAddr> {
+        unsafe {
+            let mut ifap: *mut ifaddrs = std::ptr::null_mut();
+            if getifaddrs(&mut ifap) != 0 {
+                return None;
+            }
+            let mut cur = ifap;
+            while !cur.is_null() {
+                let ifa = &*cur;
+                if !ifa.ifa_addr.is_null() {
+                    let ifidx = libc::if_nametoindex(ifa.ifa_name);
+                    if ifidx == idx {
+                        let sa_family = (*ifa.ifa_addr).sa_family as i32;
+                        if fam == Family::V4 && sa_family == AF_INET {
+                            let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+                            let ip = IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(
+                                sin.sin_addr.s_addr,
+                            )));
+                            freeifaddrs(ifap);
+                            return Some(ip);
+                        } else if fam == Family::V6 && sa_family == AF_INET6 {
+                            let sin6 = &*(ifa.ifa_addr as *const libc::sockaddr_in6);
+                            let ip = IpAddr::V6(std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr));
+                            freeifaddrs(ifap);
+                            return Some(ip);
+                        }
+                    }
+                }
+                cur = (*cur).ifa_next;
+            }
+            freeifaddrs(ifap);
+        }
+        None
+    }
+
+    pub fn get_default_gateways() -> Result<Vec<RouteInfo>> {
+        let mut sock = nl_socket().context("open netlink socket")?;
+        let mut out = Vec::new();
+        for family in [RtAddrFamily::Inet, RtAddrFamily::Inet6] {
+            let rtmsg = Rtmsg {
+                rtm_family: family as u8,
+                rtm_dst_len: 0,
+                rtm_src_len: 0,
+                rtm_tos: 0,
+                rtm_table: 0,
+                rtm_protocol: 0,
+                rtm_scope: 0,
+                rtm_type: 0,
+                rtm_flags: 0,
+            };
+            let nl = Nlmsghdr::new(
+                None,
+                Rtm::Getroute,
+                NlmF::REQUEST | NlmF::DUMP,
+                None,
+                None,
+                NlPayload::Payload(rtmsg),
+            );
+            sock.send(nl)?;
+            loop {
+                let msgs = sock.recv::<Nlmsghdr<Rtm, Rtmsg>>()?;
+                if msgs.is_empty() {
+                    break;
+                }
+                for m in msgs {
+                    if let NlPayload::Payload(rt) = m.get_payload()? {
+                        if rt.rtm_dst_len != 0 {
+                            continue;
+                        }
+                        let handle = m.get_attr_handle();
+                        let mut gw: Option<IpAddr> = None;
+                        let mut oif: Option<u32> = None;
+                        let mut metric: Option<u32> = None;
+                        let raw = handle.read_all()?;
+                        let iter = NlattrIter::new(raw, 0);
+                        for a in iter {
+                            let a = a?;
+                            match a.rta_type as u16 {
+                                4 => {
+                                    if let Ok(v) = a.get_payload_as::<u32>() {
+                                        oif = Some(v);
+                                    }
+                                }
+                                5 => {
+                                    let payload = a.get_payload()?;
+                                    if family == RtAddrFamily::Inet {
+                                        if payload.len() >= 4 {
+                                            gw = Some(IpAddr::V4(std::net::Ipv4Addr::new(
+                                                payload[0], payload[1], payload[2], payload[3],
+                                            )));
+                                        }
+                                    } else {
+                                        if payload.len() >= 16 {
+                                            let mut oct = [0u8; 16];
+                                            oct.copy_from_slice(&payload[0..16]);
+                                            gw = Some(IpAddr::V6(std::net::Ipv6Addr::from(oct)));
+                                        }
+                                    }
+                                }
+                                6 => {
+                                    if let Ok(v) = a.get_payload_as::<u32>() {
+                                        metric = Some(v);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let Some(gateway) = gw {
+                            let fam = if family == RtAddrFamily::Inet {
+                                Family::V4
+                            } else {
+                                Family::V6
+                            };
+                            let idx = oif.unwrap_or(0);
+                            let local = find_local_for_if(idx, fam.clone());
+                            out.push(RouteInfo {
+                                family: fam,
+                                gateway,
+                                local_addr: local,
+                                if_index: idx,
+                                metric,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub mod platform {
+    use super::*;
+    use anyhow::Result;
+    use std::ptr;
+    use std::slice;
+    use windows::Win32::Foundation::*;
+    use windows::Win32::NetworkManagement::IpHelper::*;
+    use windows::Win32::Networking::WinSock::*;
+    use winroute::{Route, RouteManager};
+
+    unsafe fn sockaddr_to_ip(sa: *const SOCKADDR) -> Option<IpAddr> {
+        if sa.is_null() {
+            return None;
+        }
+        // Use correct field access for the union
+        let fam = (*sa).sa_family.0 as u16;
+        if fam == AF_INET.0 {
+            let sin = &*(sa as *const SOCKADDR_IN);
+            let addr_bytes = sin.sin_addr.S_un.S_un_b;
+            Some(IpAddr::V4(std::net::Ipv4Addr::new(
+                addr_bytes.s_b1,
+                addr_bytes.s_b2,
+                addr_bytes.s_b3,
+                addr_bytes.s_b4,
+            )))
+        } else if fam == AF_INET6.0 {
+            let sin6 = &*(sa as *const SOCKADDR_IN6);
+            let arr: [u8; 16] = std::mem::transmute(sin6.sin6_addr.u.Byte);
+            Some(IpAddr::V6(std::net::Ipv6Addr::from(arr)))
+        } else {
+            None
+        }
+    }
+
+    fn lookup_local_for_if(if_index: u32, fam: Family) -> Option<IpAddr> {
+        // Since GetUnicastIpAddressTable is not available with current features,
+        // we'll just return None for now to avoid compilation error
+        None
+    }
+
+    pub fn get_gateways() -> Result<Vec<IpAddr>> {
+        let manager = RouteManager::new()?;
+        let routes = manager.routes()?;
+        Ok(routes
+            .into_iter()
+            .map(|r| r.gateway)
+            .filter(|g| !g.is_unspecified())
+            .collect())
+    }
+
+    pub fn get_default_gateways() -> Result<Vec<RouteInfo>> {
+        unsafe {
+            let mut out = Vec::new();
+
+            // Since the required Windows features for newer APIs aren't available,
+            // stick to the IPv4 implementation using GetIpForwardTable
+            let mut ptable: Option<*mut MIB_IPFORWARDTABLE> = None;
+            let mut size: u32 = 0;
+
+            // First call to get the required size
+            let res = GetIpForwardTable(ptable, &mut size, false);
+            if res == ERROR_INSUFFICIENT_BUFFER.0 {
+                // Allocate buffer and call again
+                let mut buf = vec![0u8; size as usize];
+                let table_ptr = buf.as_mut_ptr() as *mut MIB_IPFORWARDTABLE;
+                ptable = Some(table_ptr);
+
+                let res = GetIpForwardTable(ptable, &mut size, false);
+                if res == ERROR_SUCCESS.0 {
+                    let table_ref = unsafe { &*ptable.unwrap() };
+                    let rows = unsafe {
+                        slice::from_raw_parts(
+                            table_ref.table.as_ptr(),
+                            table_ref.dwNumEntries as usize,
+                        )
+                    };
+                    for r in rows {
+                        // Check if this is a default route (destination = 0 and mask = 0)
+                        if r.dwForwardDest == 0 && r.dwForwardMask == 0 {
+                            let ip = std::net::Ipv4Addr::from(r.dwForwardNextHop);
+                            let gw = IpAddr::V4(ip);
+                            let idx = r.dwForwardIfIndex;
+                            let local = lookup_local_for_if(idx, Family::V4);
+                            out.push(RouteInfo {
+                                family: Family::V4,
+                                gateway: gw,
+                                local_addr: local,
+                                if_index: idx,
+                                metric: Some(r.dwForwardMetric1),
+                            });
+                        }
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
 pub fn print_interfaces() {
     let network_interfaces = list_afinet_netifas().unwrap();
 
@@ -349,4 +617,40 @@ pub fn print_ports() {
             }
         }
     }
+}
+
+pub fn print_certs() {
+    println!("Loading system certificates for inspection...\n");
+
+    let certs_result: CertificateResult<Vec<u8>> = load_native_certs_raw();
+
+    if !certs_result.errors.is_empty() {
+        eprintln!("Errors occurred while loading certificates:");
+        for error in &certs_result.errors {
+            eprintln!("  - {}", error);
+        }
+        println!(); // Add a blank line after errors
+    }
+
+    println!("Found {} certificates\n", certs_result.certs.len());
+
+    for (i, cert_der) in certs_result.certs.iter().enumerate() {
+        println!("Certificate #{}:", i + 1);
+
+        match parse_certificate(cert_der) {
+            std::result::Result::Ok(cert_info) => {
+                println!("{}", cert_info);
+            }
+            Err(e) => {
+                eprintln!("  Error parsing certificate: {}", e);
+            }
+        }
+
+        println!("{}", "-".repeat(60)); // Separator between certificates
+    }
+
+    println!(
+        "Inspection complete. Processed {} certificates.",
+        certs_result.certs.len()
+    );
 }
