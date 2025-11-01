@@ -10,3 +10,5 @@ crate-type = ["rlib"]
 
 [dependencies]
 tracert = "0.9.0"
+netinfo = { path = "../netinfo" }
+anyhow = "1.0"

@@ -9,3 +9,4 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
+hickory-resolver = "0.25.2"

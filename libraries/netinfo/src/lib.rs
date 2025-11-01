@@ -332,6 +332,7 @@ fn addr_to_string(addr: &IpAddr) -> String {
     }
 }
 
+// TODO: Update API so it returns Vec<IpAddr>
 #[cfg(target_os = "linux")]
 pub mod platform {
     use super::*;
