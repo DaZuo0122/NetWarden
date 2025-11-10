@@ -531,7 +531,15 @@ pub mod platform {
         Ok(routes
             .into_iter()
             .map(|r| r.gateway)
-            .filter(|g| !g.is_unspecified())
+            .filter(|g| {
+                if g.is_unspecified() {
+                    return false;
+                }
+                match g {
+                    IpAddr::V4(_) => true,
+                    IpAddr::V6(v6) => !v6.is_unicast_link_local(), // excludes fe80::/10
+                }
+            })
             .collect())
     }
 

@@ -89,6 +89,12 @@ impl Default for GeoDbReader {
     }
 }
 
+pub fn geo_lookup(ip_addr: &IpAddr) -> Result<IpGeoInfo> {
+    let ip = ip_addr.to_string();
+    let reader = GeoDbReader::default();
+    reader.lookup(ip.as_str())
+}
+
 fn open_asn_reader() -> Result<Reader<Vec<u8>>> {
     let possible = gen_default_path_asn()?;
     for p in possible.iter() {

@@ -1182,7 +1182,9 @@ name = "nw"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "geoip",
  "netinfo",
+ "probe",
  "tcping",
 ]
 
@@ -1319,6 +1321,7 @@ name = "probe"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "geoip",
  "netinfo",
  "tracert",
 ]

@@ -7,4 +7,6 @@ edition = "2024"
 [dependencies]
 tcping = { path = "../../libraries/tcping" }
 netinfo = { path = "../../libraries/netinfo" }
+probe = { path = "../../libraries/probe"}
+geoip = { path = "../../libraries/geoip"}
 anyhow = "1.0"
